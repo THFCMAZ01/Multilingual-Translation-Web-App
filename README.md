@@ -142,3 +142,13 @@ Student_ID: 2410123
 Course: BSE 3350 Full-Stack Web Development
 
 link: https://translation-app1.vercel.app/
+
+
+## Native Android app
+
+A native Android version is available in the `android-app/` directory. It uses Kotlin, Jetpack Compose, Android Text-to-Speech and Room for local translation history and favourites.
+
+- Minimum Android version: API 24 (Android 7.0); Android 11 (API 30) is supported.
+- Translation requires an internet connection; saved translations remain available offline.
+- GitHub Actions builds a debug APK and publishes it as the `LinguaSwift-debug-APK` artifact.
+- See [Android app build instructions](android-app/README.md).

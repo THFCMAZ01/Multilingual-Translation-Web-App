@@ -64,7 +64,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         if (::speech.isInitialized) { speech.stop(); speech.shutdown() }
-        if (::database.isInitialized) database.close()
         super.onDestroy()
     }
 }
