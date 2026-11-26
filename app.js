@@ -232,7 +232,8 @@ document.addEventListener('DOMContentLoaded', () => {
    * @param {string} langCode — BCP-47 tag or 'autodetect'
    */
   function speak(text, langCode) {
-    if (!('speechSynthesis' in window)) {
+    if (!('speechSynthesis' in window) ||
+        typeof window.SpeechSynthesisUtterance === 'undefined') {
       showStatus('Text-to-Speech is not supported in your browser.');
       return;
     }
@@ -242,11 +243,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const synth = window.speechSynthesis;
-    const lang  = langCode === 'autodetect' ? 'en' : langCode;
+    const lang = langCode === 'autodetect' ? 'en' : langCode;
 
     /**
-     * Pick the best available voice for `lang`.
-     * Priority: exact match → same language root → device default (null).
+     * Match the selected language to an installed device voice.
+     * Android can report locale tags with underscores, so normalise
+     * them before comparing (for example, fr_FR becomes fr-FR).
+     *
      * @param {string} targetLang
      * @returns {SpeechSynthesisVoice|null}
      */
@@ -254,86 +257,61 @@ document.addEventListener('DOMContentLoaded', () => {
       const voices = synth.getVoices();
       if (!voices.length) return null;
 
-      // 1. Exact match e.g. 'fr' matches voice.lang 'fr'
-      const exact = voices.find(v => v.lang.toLowerCase() === targetLang.toLowerCase());
-      if (exact) return exact;
+      const normalise = value => (value || '').replace(/_/g, '-').toLowerCase();
+      const target = normalise(targetLang);
+      const root = target.split('-')[0];
 
-      // 2. Root match e.g. 'fr' matches 'fr-FR', 'fr-CA' etc.
-      const root = targetLang.split('-')[0].toLowerCase();
-      const partial = voices.find(v => v.lang.toLowerCase().startsWith(root + '-') ||
-                                       v.lang.toLowerCase() === root);
-      if (partial) return partial;
-
-      // 3. No voice for this language — return null (browser picks default)
-      return null;
+      return voices.find(voice => normalise(voice.lang) === target) ||
+        voices.find(voice => normalise(voice.lang).split('-')[0] === root) ||
+        null;
     }
 
-    /** Queue the utterance, optionally cancelling any current speech first. */
-    function doSpeak() {
-      const utterance  = new SpeechSynthesisUtterance(text);
-      utterance.lang   = lang;
-      const voice      = pickVoice(lang);
-      if (voice) utterance.voice = voice;
+    const utterance = new window.SpeechSynthesisUtterance(text);
+    utterance.lang = lang;
 
-      utterance.onerror = (e) => {
-        // 'interrupted' is expected when cancel() stops a prior utterance
-        if (e.error === 'interrupted') return;
+    // Do not wait for voiceschanged here. On Android, getVoices() can
+    // initially return an empty list. Waiting for that event (or a timeout)
+    // moves speak() outside the button tap, where Chrome may block playback
+    // because speech synthesis requires user activation. When no voice is
+    // listed yet, the browser can still use the utterance lang to ask the
+    // device's default speech engine for a suitable voice.
+    const voice = pickVoice(lang);
+    if (voice) utterance.voice = voice;
 
-        // Map error codes to user-readable messages
-        const messages = {
-          'language-unavailable': 'No voice installed for this language on your device. Try installing a language pack in your device settings.',
-          'voice-unavailable':    'No voice available for this language on your device.',
-          'synthesis-failed':     'Text-to-Speech failed. Try tapping the button again.',
-          'synthesis-unavailable':'Text-to-Speech is not available on this device.',
-          'not-allowed':          'Text-to-Speech was blocked. Tap the button to try again.',
-          'audio-busy':           'Audio is busy. Please wait and try again.',
-          'network':              'Network error during Text-to-Speech. Check your connection.',
-          'canceled':             null, // silent — user or system cancelled intentionally
-        };
+    utterance.onstart = () => hideStatus();
 
-        const msg = messages[e.error];
-        if (msg !== undefined) {
-          if (msg !== null) showStatus(msg);
-        } else {
-          showStatus('Text-to-Speech failed. Try again or check your device volume.');
-        }
+    utterance.onerror = event => {
+      // 'interrupted' is expected when a previous utterance is replaced.
+      if (event.error === 'interrupted' || event.error === 'canceled') return;
+
+      const messages = {
+        'language-unavailable': 'No voice is installed for ' + lang + '. Install a speech voice for this language in your device settings.',
+        'voice-unavailable': 'No voice is available for ' + lang + ' on this device.',
+        'synthesis-failed': 'Text-to-Speech failed. Check your device speech engine and try again.',
+        'synthesis-unavailable': 'Text-to-Speech is not available on this device.',
+        'not-allowed': 'Your browser blocked speech playback. Tap Listen again and check your browser audio settings.',
+        'audio-busy': 'Audio is busy. Please wait and try again.',
+        'network': 'A network error interrupted Text-to-Speech. Check your connection.'
       };
 
+      showStatus(messages[event.error] ||
+        'Text-to-Speech could not start. Check your device volume and installed speech voices.');
+    };
+
+    try {
+      if (synth.paused) synth.resume();
+
       if (synth.speaking || synth.pending) {
-        // Cancel current speech, yield one tick so mobile doesn't swallow
-        // the new speak() call during the cancel teardown
+        // Replacing an active utterance: cancel it, then yield one event-loop
+        // tick for mobile speech engines to finish their cancellation.
         synth.cancel();
         setTimeout(() => synth.speak(utterance), 0);
       } else {
+        // First playback starts synchronously inside the Listen button tap.
         synth.speak(utterance);
       }
-    }
-
-    // Wait for voices to be available (Android loads them asynchronously)
-    const voices = synth.getVoices();
-    if (voices.length > 0) {
-      doSpeak();
-    } else {
-      // Voices not ready yet — wait for voiceschanged, 2s timeout fallback
-      let fired = false;
-
-      const onVoicesChanged = () => {
-        if (fired) return;
-        fired = true;
-        synth.removeEventListener('voiceschanged', onVoicesChanged);
-        doSpeak();
-      };
-
-      synth.addEventListener('voiceschanged', onVoicesChanged);
-
-      // Fallback: if voiceschanged never fires, attempt anyway after 2s
-      setTimeout(() => {
-        if (!fired) {
-          fired = true;
-          synth.removeEventListener('voiceschanged', onVoicesChanged);
-          doSpeak();
-        }
-      }, 2000);
+    } catch (error) {
+      showStatus('Could not start Text-to-Speech. Check your device speech settings and try again.');
     }
   }
 
